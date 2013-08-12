@@ -86,8 +86,8 @@ weak_cb(shim_val_t* val, void* data)
 
 	dtrace_close(dtp);
 
-  shim_ValueDispose(val);
-  shim_ValueDispose(baton->cb);
+  shim_persistent_dispose(val);
+  shim_persistent_dispose(baton->cb);
 
   free(baton);
 }
@@ -95,15 +95,15 @@ weak_cb(shim_val_t* val, void* data)
 shim_val_t*
 probedesc(shim_ctx_t* ctx, const dtrace_probedesc_t *pd)
 {
-  shim_val_t* probe = shim_NewObject(ctx, NULL, NULL, NULL);
-	shim_SetProperty(ctx, probe, "provider",
-    shim_NewStringCopyZ(ctx, pd->dtpd_provider));
-	shim_SetProperty(ctx, probe, "module",
-    shim_NewStringCopyZ(ctx, pd->dtpd_mod));
-	shim_SetProperty(ctx, probe, "function",
-    shim_NewStringCopyZ(ctx, pd->dtpd_func));
-	shim_SetProperty(ctx, probe, "name",
-    shim_NewStringCopyZ(ctx, pd->dtpd_name));
+  shim_val_t* probe = shim_obj_new(ctx, NULL, NULL);
+	shim_obj_set_prop_name(ctx, probe, "provider",
+    shim_string_new_copy(ctx, pd->dtpd_provider));
+	shim_obj_set_prop_name(ctx, probe, "module",
+    shim_string_new_copy(ctx, pd->dtpd_mod));
+	shim_obj_set_prop_name(ctx, probe, "function",
+    shim_string_new_copy(ctx, pd->dtpd_func));
+	shim_obj_set_prop_name(ctx, probe, "name",
+    shim_string_new_copy(ctx, pd->dtpd_name));
 
 	return (probe);
 }
@@ -120,26 +120,27 @@ _bufhandler(const dtrace_bufdata_t *bufdata, void *arg)
 		return (DTRACE_HANDLE_OK);
 
   shim_val_t* probe = probedesc(ctx, data->dtpda_pdesc);
-  shim_val_t* record = shim_NewObject(ctx, NULL, NULL, NULL);
-	shim_SetProperty(ctx, record, "data",
-    shim_NewStringCopyZ(ctx, bufdata->dtbda_buffered));
+  shim_val_t* record = shim_obj_new(ctx, NULL, NULL);
+	shim_obj_set_prop_name(ctx, record, "data",
+    shim_string_new_copy(ctx, bufdata->dtbda_buffered));
 	shim_val_t* argv[2] = { probe, record };
 
-  shim_val_t rval;
-  shim_CallFunctionValue(ctx, NULL, *dtc->cb, 2, argv, &rval);
+  shim_val_t* rval = malloc(sizeof(shim_val_t*));
+  shim_func_call_val(ctx, NULL, dtc->cb, 2, argv, rval);
+  shim_value_release(rval);
 
 	return (DTRACE_HANDLE_OK);
 }
 
 int
-Consumer(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+Consumer(shim_ctx_t* ctx, shim_args_t *args)
 {
 	int err;
 	dtrace_hdl_t *dtp;
 
 	if ((dtp = dtrace_open(DTRACE_VERSION, 0, &err)) == NULL)
   {
-    shim_ThrowError(ctx, dtrace_errmsg(NULL, err));
+    shim_throw_error(ctx, dtrace_errmsg(NULL, err));
     return FALSE;
   }
 
@@ -152,16 +153,15 @@ Consumer(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 
   agg_baton_t* baton = malloc(sizeof(agg_baton_t));
 
-  shim_val_t* cb = argv[0];
-  shim_AddValueRoot(ctx, cb);
+  shim_val_t* cb = shim_args_get(args, 0);
 
   baton->ctx = ctx;
   baton->handle = dtp;
-  baton->cb = cb;
+  baton->cb = shim_persistent_new(ctx, cb);
 
 	if (dtrace_handle_buffered(dtp, _bufhandler, baton) == -1)
   {
-    shim_ThrowError(ctx, dtrace_errmsg(dtp, dtrace_errno(dtp)));
+    shim_throw_error(ctx, dtrace_errmsg(dtp, dtrace_errno(dtp)));
     return FALSE;
   }
 
@@ -169,10 +169,11 @@ Consumer(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 	dtc_ranges = NULL;
 */
 
-  shim_val_t* external = shim_NewExternal(ctx, dtp);
-  shim_ValueMakeWeak(ctx, external, baton, weak_cb);
+  shim_val_t* external = shim_external_new(ctx, dtp);
+  shim_val_t* pexternal = shim_persistent_new(ctx, external);
+  shim_obj_make_weak(ctx, pexternal, baton, weak_cb);
 
-  SHIM_SET_RVAL(ctx, argv, external);
+  shim_args_set_rval(ctx, args, external);
 
   return TRUE;
 };
@@ -248,13 +249,13 @@ _error(shim_ctx_t* ctx, const char *fmt, ...)
 		buf[strlen(buf) - 1] = '\0';
 	}
 
-	shim_ThrowError(ctx, err);
+	shim_throw_error(ctx, err);
 }
 
 shim_val_t*
 _badarg(shim_ctx_t* ctx, const char *msg)
 {
-	return (shim_NewStringCopyZ(ctx, msg));
+	return (shim_string_new_copy(ctx, msg));
 }
 
 int
@@ -277,25 +278,25 @@ _valid(const dtrace_recdesc_t *rec)
 }
 
 shim_val_t*
-_record(const dtrace_recdesc_t *rec, caddr_t addr, agg_baton_t* dtp)
+_record(const dtrace_recdesc_t *rec, caddr_t addr, agg_baton_t* dtp, shim_ctx_t* ctx)
 {
 	switch (rec->dtrd_action) {
 	case DTRACEACT_DIFEXPR:
 		switch (rec->dtrd_size) {
 		case sizeof (uint64_t):
-			return (shim_NumberValue(*((int64_t *)addr)));
+			return (shim_number_new(ctx, *((int64_t *)addr)));
       break;
 		case sizeof (uint32_t):
-			return (shim_NumberValue(*((int32_t *)addr)));
+			return (shim_number_new(ctx, *((int32_t *)addr)));
       break;
 		case sizeof (uint16_t):
-			return (shim_NumberValue(*((uint16_t *)addr)));
+			return (shim_number_new(ctx, *((uint16_t *)addr)));
       break;
 		case sizeof (uint8_t):
-			return (shim_NumberValue(*((uint8_t *)addr)));
+			return (shim_number_new(ctx, *((uint8_t *)addr)));
       break;
 		default:
-			return (shim_NewStringCopyZ(dtp->ctx, (const char *)addr));
+			return (shim_string_new_copy(dtp->ctx, (const char *)addr));
       break;
 		}
     break;
@@ -328,7 +329,7 @@ _record(const dtrace_recdesc_t *rec, caddr_t addr, agg_baton_t* dtp)
 			 * tick -- or "<undefined>" if there is none.
 			 */
 			if ((tick = strchr(buf, '`')) == NULL)
-				return (shim_NewStringCopyZ(dtp->ctx, "<unknown>"));
+				return (shim_string_new_copy(dtp->ctx, "<unknown>"));
 
 			*tick = '\0';
 		} else if (rec->dtrd_action == DTRACEACT_SYM ||
@@ -342,27 +343,32 @@ _record(const dtrace_recdesc_t *rec, caddr_t addr, agg_baton_t* dtp)
 				*plus = '\0';
 		}
 
-		return (shim_NewStringCopyZ(dtp->ctx, buf));
+		return (shim_string_new_copy(dtp->ctx, buf));
     }
     break;
 	}
 
 	assert(B_FALSE);
-	return (shim_NumberValue(-1));
+	return (shim_number_new(ctx, -1));
 }
 
 int
-strcompile(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+strcompile(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  size_t argc = shim_args_length(args);
+
+  shim_val_t* arg0 = shim_args_get(args, 0);
+  shim_val_t* arg1 = shim_args_get(args, 1);
+
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg0);
 	dtrace_prog_t *dp;
 	dtrace_proginfo_t info;
 
 	if (argc < 2) {
-		SHIM_SET_RVAL(ctx, argv, _badarg(ctx, "expected program"));
+		shim_args_set_rval(ctx, args, _badarg(ctx, "expected program"));
   }
 
-  char* program = shim_EncodeString(ctx, argv[1]);
+  char* program = shim_string_value(arg1);
 
 	if ((dp = dtrace_program_strcompile(dtp, program,
 	    DTRACE_PROBESPEC_NAME, 0, 0, NULL)) == NULL) {
@@ -383,17 +389,23 @@ strcompile(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 }
 
 int
-setopt(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+setopt(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  size_t argc = shim_args_length(args);
+
+  shim_val_t* arg0 = shim_args_get(args, 0);
+  shim_val_t* arg1 = shim_args_get(args, 1);
+  shim_val_t* arg2 = shim_args_get(args, 2);
+
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg0);
 	int rval;
 
 	if (argc < 2) {
-		SHIM_SET_RVAL(ctx, argv, _badarg(ctx, "expected an option to set"));
+		shim_args_set_rval(ctx, args, _badarg(ctx, "expected an option to set"));
     return FALSE;
   }
 
-  char* option = shim_EncodeString(ctx, argv[1]);
+  const char* option = shim_string_value(arg1);
 
 	if (argc >= 3) {
     /*
@@ -404,7 +416,7 @@ setopt(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 			return (dtc->badarg("option value can't be an object"));
     */
 
-    char* optval = shim_EncodeString(ctx, argv[2]);
+    const char* optval = shim_string_value(arg2);
 		rval = dtrace_setopt(dtp, option, optval);
     free(optval);
 	} else {
@@ -424,9 +436,10 @@ setopt(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 }
 
 int
-go(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+go(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  shim_val_t* arg = shim_args_get(args, 0);
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg);
 
 	if (dtrace_go(dtp) == -1) {
 		_error(ctx, "couldn't enable tracing: %s\n",
@@ -438,9 +451,10 @@ go(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 }
 
 int
-stop(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+stop(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  shim_val_t* arg = shim_args_get(args, 0);
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg);
 
 	if (dtrace_stop(dtp) == -1) {
     _error(ctx, "couldn't disable tracing: %s\n",
@@ -458,14 +472,14 @@ _consume(const dtrace_probedata_t *data,
   agg_baton_t* dtc = (agg_baton_t*)arg;
   shim_ctx_t* ctx = dtc->ctx;
 	dtrace_probedesc_t *pd = data->dtpda_pdesc;
-	shim_val_t* datum;
 
 	shim_val_t* probe = probedesc(ctx, data->dtpda_pdesc);
 
 	if (rec == NULL) {
 		shim_val_t* argv[1] = { probe };
-    shim_val_t rval;
-    shim_CallFunctionValue(ctx, NULL, *dtc->cb, 1, argv, &rval);
+    shim_val_t* rval = malloc(sizeof(shim_val_t*));
+    shim_func_call_val(ctx, NULL, dtc->cb, 1, argv, rval);
+    shim_value_release(rval);
 		return (DTRACE_CONSUME_NEXT);
 	}
 
@@ -486,29 +500,31 @@ _consume(const dtrace_probedata_t *data,
 		return (DTRACE_CONSUME_ABORT);
 	}
 
-  shim_val_t* record = shim_NewObject(ctx, NULL, NULL, NULL);
-	shim_SetProperty(ctx, record, "data", _record(rec, data->dtpda_data, dtc));
+  shim_val_t* record = shim_obj_new(ctx, NULL, NULL);
+	shim_obj_set_prop_name(ctx, record, "data", _record(rec, data->dtpda_data, dtc, ctx));
 	shim_val_t* argv[2] = { probe, record };
-  shim_val_t rval;
-  shim_CallFunctionValue(ctx, NULL, *dtc->cb, 2, argv, &rval);
+  shim_val_t* rval = malloc(sizeof(shim_val_t*));
+  shim_func_call_val(ctx, NULL, dtc->cb, 2, argv, rval);
+  shim_value_release(rval);
 
 	return (DTRACE_CONSUME_THIS);
 }
 
 int
-consume(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+consume(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  shim_val_t* arg = shim_args_get(args, 0);
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg);
 	dtrace_workstatus_t status;
 
   agg_baton_t baton;
   baton.ctx = ctx;
-	baton.cb = argv[1];
+	baton.cb = shim_args_get(args, 1);
   baton.handle = dtp;
 
 	status = dtrace_work(dtp, NULL, NULL, _consume, &baton);
 
-	if (status == -1 || shim_IsExceptionPending(ctx))
+	if (status == -1 || shim_exception_pending(ctx))
     return FALSE;
 
   return TRUE;
@@ -559,7 +575,7 @@ ranges_quantize(shim_ctx_t* ctx, dtrace_aggvarid_t varid)
 	ranges = malloc(sizeof(shim_val_t*) *DTRACE_QUANTIZE_NBUCKETS);
 
 	for (i = 0; i < DTRACE_QUANTIZE_NBUCKETS; i++) {
-		ranges[i] = shim_NewArrayObject(ctx, 2, NULL);
+		ranges[i] = shim_array_new(ctx, 2);
 
 		if (i < DTRACE_QUANTIZE_ZEROBUCKET) {
 			/*
@@ -579,8 +595,8 @@ ranges_quantize(shim_ctx_t* ctx, dtrace_aggvarid_t varid)
 			    INT64_MAX;
 		}
 
-		shim_SetElement(ctx, ranges[i], 0, shim_NumberValue(min));
-		shim_SetElement(ctx, ranges[i], 1, shim_NumberValue(max));
+		shim_array_set(ctx, ranges[i], 0, shim_number_new(ctx, min));
+		shim_array_set(ctx, ranges[i], 1, shim_number_new(ctx, max));
 	}
 
 /* TODO
@@ -611,13 +627,13 @@ ranges_lquantize(shim_ctx_t* ctx, dtrace_aggvarid_t varid,
 	ranges = malloc(sizeof(shim_val_t*) * (levels + 2));
 
 	for (i = 0; i <= levels + 1; i++) {
-		ranges[i] = shim_NewArrayObject(ctx, 2, NULL);
+		ranges[i] = shim_array_new(ctx, 2);
 
 		min = i == 0 ? INT64_MIN : base + ((i - 1) * step);
 		max = i > levels ? INT64_MAX : base + (i * step) - 1;
 
-		shim_SetElement(ctx, ranges[i], 0, shim_NumberValue(min));
-		shim_SetElement(ctx, ranges[i], 1, shim_NumberValue(max));
+		shim_array_set(ctx, ranges[i], 0, shim_number_new(ctx, min));
+		shim_array_set(ctx, ranges[i], 1, shim_number_new(ctx, max));
 	}
 
 /* TODO
@@ -650,18 +666,18 @@ ranges_llquantize(shim_ctx_t* ctx, dtrace_aggvarid_t varid,
 	for (order = 0; order < low; order++)
 		value *= factor;
 
-	ranges[bucket] = shim_NewArrayObject(ctx, 2, NULL);
-	shim_SetElement(ctx, ranges[bucket], 0, shim_NumberValue(0));
-	shim_SetElement(ctx, ranges[bucket], 1, shim_NumberValue(value - 1));
+	ranges[bucket] = shim_array_new(ctx, 2);
+	shim_array_set(ctx, ranges[bucket], 0, shim_number_new(ctx, 0));
+	shim_array_set(ctx, ranges[bucket], 1, shim_number_new(ctx, value - 1));
 	bucket++;
 
 	next = value * factor;
 	step = next > nsteps ? next / nsteps : 1;
 
 	while (order <= high) {
-		ranges[bucket] = shim_NewArrayObject(ctx, 2, NULL);
-		shim_SetElement(ctx, ranges[bucket], 0, shim_NumberValue(value));
-		shim_SetElement(ctx, ranges[bucket], 1, shim_NumberValue(value + step - 1));
+		ranges[bucket] = shim_array_new(ctx, 2);
+		shim_array_set(ctx, ranges[bucket], 0, shim_number_new(ctx, value));
+		shim_array_set(ctx, ranges[bucket], 1, shim_number_new(ctx, value + step - 1));
 		bucket++;
 
 		if ((value += step) != next)
@@ -672,9 +688,9 @@ ranges_llquantize(shim_ctx_t* ctx, dtrace_aggvarid_t varid,
 		order++;
 	}
 
-	ranges[bucket] = shim_NewArrayObject(ctx, 2, NULL);
-	shim_SetElement(ctx, ranges[bucket], 0, shim_NumberValue(value));
-	shim_SetElement(ctx, ranges[bucket], 1, shim_NumberValue(INT64_MAX));
+	ranges[bucket] = shim_array_new(ctx, 2);
+	shim_array_set(ctx, ranges[bucket], 0, shim_number_new(ctx, value));
+	shim_array_set(ctx, ranges[bucket], 1, shim_number_new(ctx, INT64_MAX));
 
 	assert(bucket + 1 == nbuckets);
 
@@ -699,14 +715,13 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 	 * We expect to have both a variable ID and an aggregation value here;
 	 * if we have fewer than two records, something is deeply wrong.
 	 */
-  id = shim_NumberValue(aggdesc->dtagd_varid);
+  id = shim_number_new(ctx, aggdesc->dtagd_varid);
 	assert(aggdesc->dtagd_nrecs >= 2);
-  key = shim_NewArrayObject(dtc->ctx, aggdesc->dtagd_nrecs - 2, NULL);
+  key = shim_array_new(dtc->ctx, aggdesc->dtagd_nrecs - 2);
 
 	for (i = 1; i < aggdesc->dtagd_nrecs - 1; i++) {
 		const dtrace_recdesc_t *rec = &aggdesc->dtagd_rec[i];
 		caddr_t addr = agg->dtada_data + rec->dtrd_offset;
-    shim_val_t* datum;
 
 		if (!_valid(rec)) {
 			_error(ctx, "unsupported action %s "
@@ -716,7 +731,7 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 			return (DTRACE_AGGWALK_ERROR);
 		}
 
-		shim_SetElement(dtc->ctx, key, i - 1, _record(rec, addr, dtc));
+		shim_array_set(dtc->ctx, key, i - 1, _record(rec, addr, dtc, ctx));
 	}
 
 	aggrec = &aggdesc->dtagd_rec[aggdesc->dtagd_nrecs - 1];
@@ -729,7 +744,7 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 		caddr_t addr = agg->dtada_data + aggrec->dtrd_offset;
 
 		assert(aggrec->dtrd_size == sizeof (uint64_t));
-		val = shim_NumberValue(*((int64_t *)addr));
+		val = shim_number_new(ctx, *((int64_t *)addr));
 		break;
 	}
 
@@ -738,12 +753,12 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 		    aggrec->dtrd_offset);
 
 		assert(aggrec->dtrd_size == sizeof (uint64_t) * 2);
-		val = shim_NumberValue(data[1] / (double)data[0]);
+		val = shim_number_new(ctx, data[1] / (double)data[0]);
 		break;
 	}
 
 	case DTRACEAGG_QUANTIZE: {
-		shim_val_t* quantize = shim_NewArrayObject(ctx, 0, NULL);
+		shim_val_t* quantize = shim_array_new(ctx, 0);
 		const int64_t *data = (int64_t *)(agg->dtada_data +
 		    aggrec->dtrd_offset);
 		shim_val_t **ranges, *datum;
@@ -755,11 +770,11 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 			if (!data[i])
 				continue;
 
-			datum = shim_NewArrayObject(ctx, 2, NULL);
-			shim_SetElement(ctx, datum, 0, ranges[i]);
-			shim_SetElement(ctx, datum, 1, shim_NumberValue(data[i]));
+			datum = shim_array_new(ctx, 2);
+			shim_array_set(ctx, datum, 0, ranges[i]);
+			shim_array_set(ctx, datum, 1, shim_number_new(ctx, data[i]));
 
-      shim_SetElement(ctx, quantize, j++, datum);
+      shim_array_set(ctx, quantize, j++, datum);
 		}
 
 		val = quantize;
@@ -768,7 +783,7 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 
 	case DTRACEAGG_LQUANTIZE:
 	case DTRACEAGG_LLQUANTIZE: {
-		shim_val_t* lquantize = shim_NewArrayObject(ctx, 0, NULL);
+		shim_val_t* lquantize = shim_array_new(ctx, 0);
 		const int64_t *data = (int64_t *)(agg->dtada_data +
 		    aggrec->dtrd_offset);
 		shim_val_t **ranges, *datum;
@@ -785,11 +800,11 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 			if (!data[i])
 				continue;
 
-			datum = shim_NewArrayObject(ctx, 2, NULL);
-			shim_SetElement(ctx, datum, 0, ranges[i]);
-			shim_SetElement(ctx, datum, 1, shim_NumberValue(data[i]));
+			datum = shim_array_new(ctx, 2);
+			shim_array_set(ctx, datum, 0, ranges[i]);
+			shim_array_set(ctx, datum, 1, shim_number_new(ctx, data[i]));
 
-      shim_SetElement(ctx, lquantize, j++, datum);
+      shim_array_set(ctx, lquantize, j++, datum);
 		}
 
 		val = lquantize;
@@ -804,21 +819,23 @@ _aggwalk(const dtrace_aggdata_t *agg, void *arg)
 	}
 
 	shim_val_t* argv[3] = { id, key, val };
-  shim_val_t rval;
-  shim_CallFunctionValue(ctx, NULL, *dtc->cb, 3, argv, &rval);
+  shim_val_t* rval = malloc(sizeof(shim_val_t*));
+  shim_func_call_val(ctx, NULL, dtc->cb, 3, argv, rval);
+  shim_value_release(rval);
 
 	return (DTRACE_AGGWALK_REMOVE);
 }
 
 int
-aggwalk(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+aggwalk(shim_ctx_t* ctx, shim_args_t *args)
 {
-	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_ExternalValue(ctx, argv[0]);
+  shim_val_t* arg = shim_args_get(args, 0);
+	dtrace_hdl_t *dtp = (dtrace_hdl_t*)shim_external_value(ctx, arg);
 	int rval;
 
   agg_baton_t baton;
   baton.ctx = ctx;
-  baton.cb = argv[1];
+  baton.cb = shim_args_get(args, 1);
   baton.handle = dtp;
 
 	if (dtrace_status(dtp) == -1) {
@@ -845,7 +862,7 @@ aggwalk(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
   */
 
 	if (rval == -1) {
-		if (shim_IsExceptionPending(ctx))
+		if (shim_exception_pending(ctx))
 			return FALSE;
 
 		_error(ctx, "couldn't walk aggregate: %s\n",
@@ -857,44 +874,44 @@ aggwalk(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
 }
 
 int
-aggmin(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+aggmin(shim_ctx_t* ctx, shim_args_t *args)
 {
-  SHIM_SET_RVAL(ctx, argv, shim_NumberValue(INT64_MIN));
+  shim_args_set_rval(ctx, args, shim_number_new(ctx, INT64_MIN));
   return TRUE;
 }
 
 int
-aggmax(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+aggmax(shim_ctx_t* ctx, shim_args_t *args)
 {
-  SHIM_SET_RVAL(ctx, argv, shim_NumberValue(INT64_MAX));
+  shim_args_set_rval(ctx, args, shim_number_new(ctx, INT64_MAX));
   return TRUE;
 }
 
 int
-version(shim_ctx_t* ctx, size_t argc, shim_val_t** argv)
+version(shim_ctx_t* ctx, shim_args_t *args)
 {
-  SHIM_SET_RVAL(ctx, argv, shim_NewStringCopyZ(ctx, _dtrace_version));
+  shim_args_set_rval(ctx, args, shim_string_new_copy(ctx, _dtrace_version));
 	return TRUE;
 }
 
 int
 Initialize(shim_ctx_t* ctx, shim_val_t* exports, shim_val_t* module)
 {
-  shim_FunctionSpec funcs[] = {
-    SHIM_FS_DEF(Consumer, 0),
-    SHIM_FS_DEF(strcompile, 0),
-    SHIM_FS_DEF(setopt, 0),
-    SHIM_FS_DEF(go, 0),
-    SHIM_FS_DEF(consume, 0),
-    SHIM_FS_DEF(aggwalk, 0),
-    SHIM_FS_DEF(aggmin, 0),
-    SHIM_FS_DEF(aggmax, 0),
-    SHIM_FS_DEF(stop, 0),
-    SHIM_FS_DEF(version, 0),
+  shim_fspec_t funcs[] = {
+    SHIM_FS(Consumer),
+    SHIM_FS(strcompile),
+    SHIM_FS(setopt),
+    SHIM_FS(go),
+    SHIM_FS(consume),
+    SHIM_FS(aggwalk),
+    SHIM_FS(aggmin),
+    SHIM_FS(aggmax),
+    SHIM_FS(stop),
+    SHIM_FS(version),
     SHIM_FS_END,
   };
 
-  shim_DefineFunctions(ctx, exports, funcs);
+  shim_obj_set_funcs(ctx, exports, funcs);
   return TRUE;
 }
 

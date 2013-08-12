@@ -8,7 +8,7 @@
       'cflags_cc': ['-fexceptions'],
       'ldflags': ['-ldtrace'],
       'dependencies': [ '<(node_addon)/binding.gyp:addon-layer', ],
-      'include_dirs': [ '<(node_addon)/src', ],
+      'include_dirs': [ '<(node_addon)/include', ],
       'sources': [ 
         'libdtrace.c'
       ], 
